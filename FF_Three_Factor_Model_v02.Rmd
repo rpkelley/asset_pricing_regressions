@@ -1,0 +1,168 @@
+---
+title: "Asset Pricing Models and Regression Analysis"
+output: pdf_document
+---
+
+# Introduction
+
+Here I look at different asset pricing models, including the Capital Asset Pricing Model (commonly known as CAPM) and also the Fama-French three factor model (FF). Both of these models are based on linear relationships, and so will be examined using a series of linear regressions.
+
+First we import some packages that we'll need later:
+
+```{r message=FALSE}
+require( dplyr )
+require( lubridate )
+require( quantreg )
+require( stargazer )
+```
+
+# Data
+
+The analysis requires stock returns data for an individual security, as well as returns data for the three Fama-French factors. The FF returns data can be downloaded from the **[French Data Library](http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/Data_Library/f-f_factors.html)**.
+
+```{r}
+# import the FF factor returns from a CSV file
+FF.Data = read.csv( file = 'F-F_Research_Data_Factors_daily.CSV' , header = TRUE )
+head( FF.Data )
+```
+
+We similarly pull the stock returns data from a **[posted Kaggle dataset](https://www.kaggle.com/fayomi/apple-stock-prices-from-20102017/version/1)**.
+
+```{r}
+# import the FF factor returns from a CSV file
+Stock.Price.Data = read.csv( file = 'apple.csv' , header = TRUE )
+head( Stock.Price.Data )
+```
+
+# Cleaning & Preprocessing
+
+There are just a few things to clean up here before we can do our analysis. The stock data, for example, has come to us in price terms, and in order to perform our analysis we will actually need the returns data. And so in this next snippet we get the lagged adjusted closing prices and then compute the lognormal returns as a new column in our dataframe. Note that in the first mutate line we also just do some simple date converstion to tell R that this column is a Date.
+
+```{r}
+Stock.Price.Manipulated = 
+  Stock.Price.Data %>% 
+  mutate( Format.Date = as.Date( Date ) ) %>% 
+  mutate( Last.Close.Price = lag( Adj..Close ) ) %>%
+  mutate( Log.Returns = 100*log( Adj..Close / Last.Close.Price ) ) 
+```
+
+In order to choose our time period, let's look backwards two years from the last available pricing date in this dataset. Two years is usually a fairly standard time frame over which to look at an asset pricing model, although it's important to note that these relationships are dynamic through time:
+
+```{r}
+Most.Recent.Stock.Date = max( Stock.Price.Manipulated$Format.Date )
+Start.Date = seq( from = Most.Recent.Stock.Date , by = "-2 years" , length= 2 )[2]
+
+Most.Recent.Stock.Date
+Start.Date
+```
+
+Now let's use this information to subset our sample:
+
+```{r}
+Stock.Price.Subset = 
+  Stock.Price.Manipulated %>% 
+  select( c( "Format.Date" , "Log.Returns" ) ) %>%
+  filter( Format.Date >= Start.Date )
+```
+
+Now that we have the security data in a good place, let's go back to the FF returns data. We'll perform a few simple manipulations as outlined in the comments below:
+
+```{r}
+# rename the first column of FF data
+colnames( FF.Data )[1] = 'Date'
+
+# convert text dates to R date objects
+FF.Data = 
+  FF.Data %>%
+  mutate( Date = as.character( Date ) ) %>%
+  mutate( Format.Date = as.Date( Date , format = '%Y%m%d' ) )
+```
+
+Now comes the key step of joining the two datasets together, which R and specifically **dplyr** makes extremely easy for us:
+
+```{r}
+Combined.Data = 
+  Stock.Price.Subset %>%
+  left_join( FF.Data , by = c( "Format.Date" = "Format.Date" ) ) %>% 
+  mutate( Stock.RFR = Log.Returns - RF ) # this last row removes the RFR from the stock returns
+
+head(Combined.Data)
+```
+
+Note that in the last step there we also computed a new column, which is to subtract the risk free rate (RFR) from the daily security returns. This is because we want the returns in excess of (over and above) the risk free rate for our pricing models.
+
+# OLS Regression Analysis
+
+Now that we have all of our data together in a single dataframe, we can begin our actual analysis. First, let's look at the CAPM:
+
+```{r}
+CAPM_Reg = lm( Stock.RFR ~ Mkt.RF 
+               , data = Combined.Data )
+
+stargazer( CAPM_Reg
+           , summary = TRUE
+           , title = 'CAPM Results'
+           , type = 'text'
+           , no.space = TRUE )
+```
+
+The result from this analysis is that our CAPM beta is 1.06. Also note that the R-squared of the model is about 38% -- 38% of the movement of this security can be explained by the movement in the market as a whole.
+
+Now let's perform the same sort of analysis, but using the FF model:
+
+```{r}
+FF_Reg = lm( Stock.RFR ~ Mkt.RF + SMB + HML 
+             , data = Combined.Data  )
+
+stargazer( FF_Reg
+           , summary = TRUE
+           , title = 'FF Results'
+           , type = 'text'
+           , no.space = TRUE )
+```
+
+From these results we can see that the security returns are significantly dependent on all three of the FF factors. The negative exposures to the SMB and HML factors are also worth considering further. The negative coefficient on the SMB factor, for example, tells us that this security likely belongs to a large company. The negative coefficient on the HML factor tells us that this security behaves more like a growth stock.
+
+# Quantile Regression Analysis
+
+In the last section we used OLS in order to estimate our asset pricing models, but OLS assumes a normal distribution. Let's now use Q-Q plots to test if that was true:
+
+```{r}
+par( mfrow = c(2,2) )
+# Security - RFR
+qqnorm( Combined.Data$Stock.RFR , main = 'Security - RFR' )
+qqline( Combined.Data$Stock.RFR , col = 2 )
+# Security - RFR
+qqnorm( Combined.Data$Mkt.RF , main = 'Mkt - RFR' )
+qqline( Combined.Data$Mkt.RF , col = 2 )
+# Security - RFR
+qqnorm( Combined.Data$SMB , main = 'SMB' )
+qqline( Combined.Data$SMB , col = 2 )
+# Security - RFR
+qqnorm( Combined.Data$HML , main = 'HML' )
+qqline( Combined.Data$HML , col = 2 )
+```
+
+Any deviation of the circles from the red line indicates a lack of normality or some skew in the data. Therefore, OLS might not be the best way to measure these relationships. So, this part of the analysis looks at the relationship between the FF returns and the security returns over various quantiles.
+
+```{r}
+# define percentiles that we want to examine
+quantiles = c( .05 , .25 , .5 , .75 , .9 )
+
+FF.Quantile.Regression = 
+  rq( Stock.RFR ~ Mkt.RF + SMB + HML 
+      , data = Combined.Data
+      , tau = quantiles )
+```
+
+As before we could output the results by passing the regression object to the summary function, but in this case let's visualize the effects through plots:
+
+```{r}
+plot( summary( FF.Quantile.Regression ) )
+```
+
+These summary plots show that the factor effects vary across the quantiles of the security return distribution. In other words, the return of this security have a different relationship with the various factor returns for lower and higher returns. 
+
+# Summary
+
+In this analysis we used OLS and quantile regressions in order to examine different asset pricing models, specifically the CAPM and the FF three factor model. The results of these asset pricing models are often used in cost of capital calculations, which are then often used to discount future cash flows and arrive at an asset valuation. Therefore, understanding these underlying models and principlies are important for asset valuation.
